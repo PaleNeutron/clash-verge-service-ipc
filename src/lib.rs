@@ -22,6 +22,9 @@ pub use core::{
 };
 pub use core::{CORE_DISPLACED_EXTENSION, CORE_STAGING_EXTENSION, OwnerPaths, ServicePaths, service_paths};
 
+#[cfg(all(feature = "standalone", windows))]
+pub use core::create_private_installer_file;
+
 #[cfg(feature = "standalone")]
 pub use core::{
     ActiveOwnerState, DesiredState, REPAIR_IN_PROGRESS_EXIT_CODE, ServiceOwnerGuard, ServiceRepairGate,

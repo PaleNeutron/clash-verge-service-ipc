@@ -65,6 +65,9 @@ mod windows_legacy_cleanup;
 #[cfg(all(feature = "standalone", windows))]
 mod windows_security;
 
+#[cfg(all(feature = "standalone", windows))]
+pub use windows_security::create_private_installer_file;
+
 /// Platform-specific service directory hardening.
 #[cfg(all(feature = "standalone", unix))]
 pub(in crate::core) use unix_security as platform_security;

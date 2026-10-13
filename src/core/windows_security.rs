@@ -37,6 +37,41 @@ const PRIVATE_SERVICE_FILE_SDDL: &str = "O:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)";
 #[cfg(feature = "test")]
 const PRIVATE_SERVICE_FILE_SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)";
 
+#[cfg(not(feature = "test"))]
+const PRIVATE_INSTALLER_FILE_SDDL: &str = "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)";
+#[cfg(feature = "test")]
+const PRIVATE_INSTALLER_FILE_SDDL: &str = "D:P(A;;FA;;;OW)(A;;FA;;;SY)(A;;FA;;;BA)";
+
+pub fn create_private_installer_file(path: &Path) -> Result<std::fs::File> {
+    use std::os::windows::io::FromRawHandle as _;
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{CREATE_NEW, FILE_ATTRIBUTE_NORMAL};
+
+    let descriptor = LocalDescriptor::from_sddl(PRIVATE_INSTALLER_FILE_SDDL)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let wide = wide_path(path)?;
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ,
+            &attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to create private installer file {path:?}"));
+    }
+    Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+}
+
 pub(crate) fn ensure_private_service_directory(path: &Path) -> Result<()> {
     ensure_private_directory(path, PRIVATE_SERVICE_DIRECTORY_SDDL, true)
 }
@@ -428,6 +463,18 @@ mod tests {
         assert!(super::legacy_repair::recover(&root, || Ok(())).is_err());
         std::fs::remove_dir(root.join("desired-state.json"))?;
         std::fs::remove_dir(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn installer_file_creation_preserves_pre_existing_contents() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!("existing-installer-file-{}", std::process::id()));
+        std::fs::write(&path, b"preserve existing data")?;
+        let result = super::create_private_installer_file(&path);
+        let contents = std::fs::read(&path)?;
+        std::fs::remove_file(path)?;
+        assert!(result.is_err());
+        assert_eq!(contents, b"preserve existing data");
         Ok(())
     }
 

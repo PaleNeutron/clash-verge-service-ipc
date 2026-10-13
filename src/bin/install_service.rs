@@ -84,6 +84,9 @@ fn stage_binary(source: &Path, target: &Path) -> Result<PathBuf, Error> {
     remove_ordinary_file_if_exists(&staged)?;
 
     let mut source_file = File::open(source).with_context(|| format!("failed to open candidate {source:?}"))?;
+    #[cfg(windows)]
+    let mut staged_file = clash_verge_service_ipc::create_private_installer_file(&staged)?;
+    #[cfg(not(windows))]
     let mut staged_file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -169,6 +172,7 @@ fn install_core(
     // Avoid replacing an unchanged executable that Windows may still have open.
     if let Ok(existing) = std::fs::symlink_metadata(&target)
         && existing.is_file()
+        && installed_binary_is_trusted(&target)
         && sha256(&target)? == source_hash
     {
         ensure_executable_label(&target)?;
@@ -300,6 +304,18 @@ fn parse_install_arguments(arguments: impl Iterator<Item = std::ffi::OsString>) 
     })
 }
 
+fn installed_binary_is_trusted(path: &Path) -> bool {
+    #[cfg(all(windows, not(feature = "test")))]
+    {
+        clash_verge_service_ipc::require_trusted_core_source(path).is_ok()
+    }
+    #[cfg(any(not(windows), feature = "test"))]
+    {
+        let _ = path;
+        true
+    }
+}
+
 #[cfg(any(windows, test))]
 fn installed_payload_matches(
     source: &Path,
@@ -309,6 +325,7 @@ fn installed_payload_matches(
 ) -> Result<bool, Error> {
     let matches = |path: &Path, expected: &[u8; 32]| -> bool {
         std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+            && installed_binary_is_trusted(path)
             && sha256(path).is_ok_and(|actual| actual == *expected)
     };
     Ok(matches(target, &sha256(source)?)
@@ -1074,6 +1091,7 @@ mod install_core_tests {
         super::parse_install_arguments(arguments.into_iter())
     }
 
+    #[cfg(any(not(windows), feature = "test"))]
     #[test]
     fn stopped_service_can_be_reused_only_with_matching_service_and_cores() -> anyhow::Result<()> {
         let root = scratch("ensure payload")?;
@@ -1162,6 +1180,65 @@ mod install_core_tests {
         assert_eq!(std::fs::read(previous)?, b"old core");
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[cfg(all(windows, not(feature = "test")))]
+    #[test]
+    fn newly_staged_core_and_service_have_a_trusted_installer_owner() -> anyhow::Result<()> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::Foundation::LocalFree;
+        use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+        use windows_sys::Win32::Security::{
+            CreateWellKnownSid, EqualSid, OWNER_SECURITY_INFORMATION, SECURITY_MAX_SID_SIZE,
+            WinBuiltinAdministratorsSid,
+        };
+        let root = scratch("staged owner")?;
+        let source = root.join("source");
+        std::fs::write(&source, b"installed bytes")?;
+        let mut administrators = vec![0usize; (SECURITY_MAX_SID_SIZE as usize).div_ceil(std::mem::size_of::<usize>())];
+        let mut length = SECURITY_MAX_SID_SIZE;
+        anyhow::ensure!(
+            unsafe {
+                CreateWellKnownSid(
+                    WinBuiltinAdministratorsSid,
+                    std::ptr::null_mut(),
+                    administrators.as_mut_ptr().cast(),
+                    &mut length,
+                )
+            } != 0
+        );
+        let result = (|| -> anyhow::Result<()> {
+            for name in [
+                clash_verge_service_ipc::CORE_NAME,
+                clash_verge_service_ipc::SERVICE_BINARY,
+            ] {
+                let staged = super::stage_binary(&source, &root.join(super::core_file_name(name)))?;
+                let file = std::fs::File::open(&staged)?;
+                let mut owner = std::ptr::null_mut();
+                let mut security = std::ptr::null_mut();
+                let status = unsafe {
+                    GetSecurityInfo(
+                        file.as_raw_handle(),
+                        SE_FILE_OBJECT,
+                        OWNER_SECURITY_INFORMATION,
+                        &mut owner,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut security,
+                    )
+                };
+                anyhow::ensure!(status == 0);
+                let trusted = unsafe { EqualSid(owner, administrators.as_mut_ptr().cast()) } != 0;
+                unsafe {
+                    LocalFree(security);
+                }
+                anyhow::ensure!(trusted, "new staged executable {staged:?} has an untrusted owner");
+            }
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
     }
 
     #[test]
