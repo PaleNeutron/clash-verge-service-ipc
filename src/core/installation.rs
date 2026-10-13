@@ -98,8 +98,12 @@ mod tests {
                 crate::CoreAvailability::Missing
             );
         }
+        let mut name = "other-brand-core".to_owned();
+        while [crate::CORE_NAME, crate::CORE_ALPHA_NAME].contains(&name.as_str()) {
+            name.push('x');
+        }
         let other = crate::CoreRequirement {
-            name: format!("other-brand-core{}", std::env::consts::EXE_SUFFIX),
+            name: format!("{name}{}", std::env::consts::EXE_SUFFIX),
             sha256: None,
         };
         assert!(matches!(

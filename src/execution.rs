@@ -284,7 +284,7 @@ pub async fn check_sidecar_available() -> Result<()> {
         {
             let mut command = std::process::Command::new("ps");
             #[cfg(target_os = "linux")]
-            command.args(["-axo", "comm=,args="]);
+            command.args(["-axo", "pid=,comm="]);
             #[cfg(not(target_os = "linux"))]
             command.args(["-axo", "comm="]);
             let output = command.output().context("could not inspect remaining cores")?;
@@ -299,6 +299,55 @@ pub async fn check_sidecar_available() -> Result<()> {
 
 #[cfg(all(unix, feature = "client"))]
 fn require_no_unix_core_processes(processes: &str, include_service: bool) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    let executables = linux_process_executables(processes, include_service)?;
+    #[cfg(not(target_os = "linux"))]
+    let executables = processes
+        .lines()
+        .map(|line| PathBuf::from(line.trim()))
+        .collect::<Vec<_>>();
+    require_no_core_executables(&executables, include_service)
+}
+
+#[cfg(all(target_os = "linux", feature = "client"))]
+fn linux_process_executables(processes: &str, include_service: bool) -> Result<Vec<PathBuf>> {
+    use std::os::unix::ffi::OsStringExt as _;
+    let mut executables = Vec::new();
+    for process in processes.lines() {
+        let (pid, name) = process
+            .trim()
+            .split_once(char::is_whitespace)
+            .context("process listing omitted its executable name")?;
+        let name = name.trim();
+        let is_core = [crate::CORE_NAME, crate::CORE_ALPHA_NAME]
+            .iter()
+            .any(|expected| process_name_matches(name, expected));
+        let is_service = include_service && process_name_matches(name, crate::SERVICE_BINARY);
+        if !is_core && !is_service {
+            continue;
+        }
+        let pid = pid.parse::<u32>().context("process listing contains an invalid pid")?;
+        match std::fs::read_link(format!("/proc/{pid}/exe")) {
+            Ok(executable) => {
+                // Linux appends this marker when an upgrade unlinks a running executable.
+                let executable =
+                    if let Some(path) = executable.as_os_str().as_encoded_bytes().strip_suffix(b" (deleted)") {
+                        PathBuf::from(std::ffi::OsString::from_vec(path.to_vec()))
+                    } else {
+                        executable
+                    };
+                executables.push(executable);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) if is_service => return Err(ResidualServiceError { process: name.into() }.into()),
+            Err(error) => return Err(error).context("could not identify a potentially remaining core executable"),
+        }
+    }
+    Ok(executables)
+}
+
+#[cfg(all(unix, feature = "client"))]
+fn require_no_core_executables(executables: &[PathBuf], include_service: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
     let other_helper = PathBuf::from("/Library/PrivilegedHelperTools")
         .join(format!("{}.bundle", crate::channel::OTHER_MACOS_SERVICE_ID))
@@ -311,40 +360,16 @@ fn require_no_unix_core_processes(processes: &str, include_service: bool) -> Res
         .join(crate::SERVICE_BINARY);
     // A residual helper outranks a core so the refusal stays repairable in any ps order.
     let mut remaining_core = None;
-    for process in processes.lines() {
-        #[cfg(target_os = "linux")]
-        let (process, arguments) = process
-            .trim()
-            .split_once(char::is_whitespace)
-            .unwrap_or((process.trim(), ""));
-        let executable = Path::new(process.trim());
+    for executable in executables {
         let name = executable.file_name().and_then(|name| name.to_str()).unwrap_or("");
-        #[cfg(target_os = "linux")]
-        let matches_process = |expected: &str| {
-            let argument_name = Path::new(arguments.split_whitespace().next().unwrap_or(""))
-                .file_name()
-                .and_then(|name| name.to_str());
-            process_name_matches(name, expected)
-                && (name == expected || argument_name.is_none_or(|name| name == expected))
-        };
-        #[cfg(not(target_os = "linux"))]
-        let matches_process = |expected: &str| process_name_matches(name, expected);
-        if [crate::CORE_NAME, crate::CORE_ALPHA_NAME]
-            .iter()
-            .any(|expected| matches_process(expected))
-        {
+        if [crate::CORE_NAME, crate::CORE_ALPHA_NAME].contains(&name) {
             remaining_core.get_or_insert(name);
         }
-        if include_service && matches_process(crate::SERVICE_BINARY) {
-            // Linux comm is truncated; argv[0] retains the installed helper's channel path.
-            #[cfg(target_os = "linux")]
-            let executable = Path::new(arguments.split_whitespace().next().unwrap_or(""));
-            if executable != other_helper {
-                return Err(ResidualServiceError {
-                    process: executable.to_path_buf(),
-                }
-                .into());
+        if include_service && name == crate::SERVICE_BINARY && executable != &other_helper {
+            return Err(ResidualServiceError {
+                process: executable.clone(),
             }
+            .into());
         }
     }
     if let Some(name) = remaining_core {
@@ -353,9 +378,9 @@ fn require_no_unix_core_processes(processes: &str, include_service: bool) -> Res
     Ok(())
 }
 
-#[cfg(all(unix, feature = "client"))]
+#[cfg(all(target_os = "linux", feature = "client"))]
 fn process_name_matches(actual: &str, expected: &str) -> bool {
-    actual == expected || (cfg!(target_os = "linux") && actual == expected.chars().take(15).collect::<String>())
+    actual == expected || actual == expected.chars().take(15).collect::<String>()
 }
 
 /// A Service helper still runs without answering IPC; only reinstalling the Service replaces it.
@@ -600,52 +625,73 @@ mod tests {
         let other = crate::channel::OTHER_SERVICE_SLUG;
         let current = crate::SERVICE_SLUG;
         let service = crate::SERVICE_BINARY;
-        let comm = service.chars().take(15).collect::<String>();
-        require_no_unix_core_processes(&format!("{comm} /var/lib/{other}/bin/{service}"), true)?;
-        assert!(require_no_unix_core_processes(&format!("{comm} /var/lib/{current}/bin/{service}"), true).is_err());
-        assert!(require_no_unix_core_processes(&format!("{comm} /tmp/{service}"), true).is_err());
+        require_no_core_executables(&[format!("/var/lib/{other}/bin/{service}").into()], true)?;
+        assert!(require_no_core_executables(&[format!("/var/lib/{current}/bin/{service}").into()], true).is_err());
+        assert!(require_no_core_executables(&[format!("/tmp/{service}").into()], true).is_err());
         assert!(
-            require_no_unix_core_processes(
-                &format!(
-                    "{comm} /var/lib/{other}/bin/{service}\n{} /tmp/{}",
-                    crate::CORE_ALPHA_NAME.chars().take(15).collect::<String>(),
-                    crate::CORE_ALPHA_NAME
-                ),
+            require_no_core_executables(
+                &[
+                    format!("/var/lib/{other}/bin/{service}").into(),
+                    format!("/tmp/{}", crate::CORE_ALPHA_NAME).into()
+                ],
                 true
             )
             .is_err()
         );
         Ok(())
     }
-    #[cfg(all(unix, feature = "client"))]
-    #[test]
-    fn linux_truncated_alpha_core_blocks_fallback() {
-        for ipc_failed in [false, true] {
-            assert!(
-                require_no_unix_core_processes(
-                    &crate::CORE_ALPHA_NAME.chars().take(15).collect::<String>(),
-                    ipc_failed
-                )
-                .is_err()
-            );
-        }
-    }
 
     #[cfg(all(unix, feature = "client"))]
     #[test]
     fn other_brand_processes_do_not_block_configured_core() -> Result<()> {
-        let other = "unrelated-brand-core";
-        require_no_unix_core_processes(&format!("{other} /tmp/{other}"), true)?;
-        let name = crate::CORE_NAME;
-        assert!(require_no_unix_core_processes(&format!("{name} /tmp/{name}"), true).is_err());
-        if option_env!("CVR_CORE_NAME").is_some_and(|name| name != "verge-mihomo") {
-            require_no_unix_core_processes("verge-mihomo /tmp/verge-mihomo", true)?;
+        let mut other = "unrelated-brand-core".to_owned();
+        while [crate::CORE_NAME, crate::CORE_ALPHA_NAME, crate::SERVICE_BINARY].contains(&other.as_str()) {
+            other.push('x');
         }
-        if crate::SERVICE_BINARY != "clash-verge-service" {
-            require_no_unix_core_processes(
-                "clash-verge-ser /var/lib/clash-verge-service/bin/clash-verge-service",
-                true,
-            )?;
+        require_no_core_executables(&[other.into()], true)?;
+        assert!(require_no_core_executables(&[crate::CORE_NAME.into()], true).is_err());
+        if ![crate::CORE_NAME, crate::CORE_ALPHA_NAME, crate::SERVICE_BINARY].contains(&"verge-mihomo") {
+            require_no_core_executables(&["/tmp/verge-mihomo".into()], true)?;
+        }
+        if ![crate::CORE_NAME, crate::CORE_ALPHA_NAME, crate::SERVICE_BINARY].contains(&"clash-verge-service") {
+            require_no_core_executables(&["/var/lib/clash-verge-service/bin/clash-verge-service".into()], true)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "linux", feature = "client"))]
+    fn probe_copied_linux_process(name: &str, expect_residual: bool) -> Result<()> {
+        let directory = std::env::temp_dir().join(format!("cvr review {name} {}", std::process::id()));
+        std::fs::create_dir_all(&directory)?;
+        let executable = directory.join(name);
+        std::fs::copy("/bin/sleep", &executable)?;
+        let mut child = std::process::Command::new(&executable).arg("30").spawn()?;
+        let result = (|| -> Result<bool> {
+            let output = std::process::Command::new("ps")
+                .args(["-p", &child.id().to_string(), "-o", "pid=,comm="])
+                .output()?;
+            anyhow::ensure!(output.status.success());
+            let detected = require_no_unix_core_processes(&String::from_utf8_lossy(&output.stdout), false);
+            Ok(detected.is_err())
+        })();
+        let _ = child.kill();
+        child.wait()?;
+        std::fs::remove_dir_all(directory)?;
+        assert_eq!(result?, expect_residual);
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "linux", feature = "client"))]
+    #[test]
+    fn linux_process_identity_detects_alpha_in_a_spaced_path() -> Result<()> {
+        probe_copied_linux_process(crate::CORE_ALPHA_NAME, true)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "client"))]
+    #[test]
+    fn linux_process_identity_distinguishes_a_fifteen_byte_core_prefix() -> Result<()> {
+        if crate::CORE_NAME.len() == 15 {
+            probe_copied_linux_process(&format!("{}-extra", crate::CORE_NAME), false)?;
         }
         Ok(())
     }
