@@ -166,8 +166,8 @@ impl PreparedCores {
         for core in cores {
             anyhow::ensure!(
                 [
-                    format!("verge-mihomo{}", std::env::consts::EXE_SUFFIX),
-                    format!("verge-mihomo-alpha{}", std::env::consts::EXE_SUFFIX)
+                    format!("{}{}", crate::CORE_NAME, std::env::consts::EXE_SUFFIX),
+                    format!("{}{}", crate::CORE_ALPHA_NAME, std::env::consts::EXE_SUFFIX)
                 ]
                 .contains(&core.name),
                 "unsupported core name {}",
@@ -221,7 +221,7 @@ pub fn prepare_install_if_requested() -> Result<bool> {
     let mut cores = Vec::new();
     let mut ensure = false;
     let mut core_only = false;
-    let mut prompt = "Install Clash Verge service and approved cores".to_owned();
+    let mut prompt = format!("Install {} and approved cores", crate::SERVICE_DISPLAY_NAME);
     #[cfg(unix)]
     let mut gid = unsafe { platform_lib::getgid() };
     while let Some(argument) = arguments.next() {
@@ -261,7 +261,7 @@ pub fn prepare_install_if_requested() -> Result<bool> {
         }
     }
     let installer = std::env::current_exe()?;
-    let service = installer.with_file_name(format!("clash-verge-service{}", std::env::consts::EXE_SUFFIX));
+    let service = installer.with_file_name(format!("{}{}", crate::SERVICE_BINARY, std::env::consts::EXE_SUFFIX));
     let PreparedCores {
         staging,
         requirements,
@@ -523,7 +523,7 @@ mod tests {
     #[test]
     fn preparation_attests_staged_bytes_before_elevation() -> Result<()> {
         let source = Staging::new()?;
-        let name = format!("verge-mihomo{}", std::env::consts::EXE_SUFFIX);
+        let name = format!("{}{}", crate::CORE_NAME, std::env::consts::EXE_SUFFIX);
         let path = source.0.join("core with spaces and 'quotes'");
         std::fs::write(&path, b"abc")?;
         let plan = PreparedCores::new(

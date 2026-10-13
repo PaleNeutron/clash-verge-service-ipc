@@ -119,7 +119,11 @@ async fn installation_query_reports_global_occupancy_and_guards_handoff() -> Res
     use clash_verge_service_ipc::execution::reserve_sidecar;
     use clash_verge_service_ipc::{CoreAvailability, CoreRequirement, inspect_installation};
     let server = start_server().await?;
-    let name = format!("verge-mihomo-alpha{}", std::env::consts::EXE_SUFFIX);
+    let name = format!(
+        "{}{}",
+        clash_verge_service_ipc::CORE_ALPHA_NAME,
+        std::env::consts::EXE_SUFFIX
+    );
     let directory = clash_verge_service_ipc::service_paths()?.core_dir();
     std::fs::create_dir_all(&directory)?;
     let core = directory.join(&name);

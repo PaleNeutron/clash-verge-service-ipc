@@ -162,10 +162,7 @@ fn coordination_path() -> Result<PathBuf> {
         PathBuf::from(String::from_utf16(&buffer[..size])?).join("Temp")
     };
     // Both channels may keep idle helpers, but core execution is shared.
-    #[cfg(feature = "test")]
-    let name = "clash-verge-service.core-execution-test.lock";
-    #[cfg(not(feature = "test"))]
-    let name = "clash-verge-service.core-execution.lock";
+    let name = format!("{}.lock", crate::channel::CORE_LOCK_NAME);
     Ok(root.join(name))
 }
 
@@ -304,23 +301,14 @@ pub async fn check_sidecar_available() -> Result<()> {
 fn require_no_unix_core_processes(processes: &str, include_service: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
     let other_helper = PathBuf::from("/Library/PrivilegedHelperTools")
-        .join(format!(
-            "{}.bundle",
-            if cfg!(feature = "development-channel") {
-                "io.github.clash-verge-rev.clash-verge-rev.service"
-            } else {
-                "io.github.clash-verge-rev.clash-verge-rev.dev.service"
-            }
-        ))
-        .join("Contents/MacOS/clash-verge-service");
+        .join(format!("{}.bundle", crate::channel::OTHER_MACOS_SERVICE_ID))
+        .join("Contents/MacOS")
+        .join(crate::SERVICE_BINARY);
     #[cfg(target_os = "linux")]
     let other_helper = PathBuf::from("/var/lib")
-        .join(if cfg!(feature = "development-channel") {
-            "clash-verge-service"
-        } else {
-            "clash-verge-service-dev"
-        })
-        .join("bin/clash-verge-service");
+        .join(crate::channel::OTHER_SERVICE_SLUG)
+        .join("bin")
+        .join(crate::SERVICE_BINARY);
     // A residual helper outranks a core so the refusal stays repairable in any ps order.
     let mut remaining_core = None;
     for process in processes.lines() {
@@ -331,10 +319,23 @@ fn require_no_unix_core_processes(processes: &str, include_service: bool) -> Res
             .unwrap_or((process.trim(), ""));
         let executable = Path::new(process.trim());
         let name = executable.file_name().and_then(|name| name.to_str()).unwrap_or("");
-        if ["verge-mihomo", "verge-mihomo-alpha", "verge-mihomo-al"].contains(&name) {
+        #[cfg(target_os = "linux")]
+        let matches_process = |expected: &str| {
+            let argument_name = Path::new(arguments.split_whitespace().next().unwrap_or(""))
+                .file_name()
+                .and_then(|name| name.to_str());
+            process_name_matches(name, expected)
+                && (name == expected || argument_name.is_none_or(|name| name == expected))
+        };
+        #[cfg(not(target_os = "linux"))]
+        let matches_process = |expected: &str| process_name_matches(name, expected);
+        if [crate::CORE_NAME, crate::CORE_ALPHA_NAME]
+            .iter()
+            .any(|expected| matches_process(expected))
+        {
             remaining_core.get_or_insert(name);
         }
-        if include_service && ["clash-verge-service", "clash-verge-ser"].contains(&name) {
+        if include_service && matches_process(crate::SERVICE_BINARY) {
             // Linux comm is truncated; argv[0] retains the installed helper's channel path.
             #[cfg(target_os = "linux")]
             let executable = Path::new(arguments.split_whitespace().next().unwrap_or(""));
@@ -350,6 +351,11 @@ fn require_no_unix_core_processes(processes: &str, include_service: bool) -> Res
         bail!("process {name} remains after IPC failure; refusing a second core");
     }
     Ok(())
+}
+
+#[cfg(all(unix, feature = "client"))]
+fn process_name_matches(actual: &str, expected: &str) -> bool {
+    actual == expected || (cfg!(target_os = "linux") && actual == expected.chars().take(15).collect::<String>())
 }
 
 /// A Service helper still runs without answering IPC; only reinstalling the Service replaces it.
@@ -591,28 +597,19 @@ mod tests {
     #[cfg(all(target_os = "linux", feature = "client"))]
     #[test]
     fn linux_idle_helper_from_other_channel_does_not_block_fallback() -> Result<()> {
-        let other = if cfg!(feature = "development-channel") {
-            "clash-verge-service"
-        } else {
-            "clash-verge-service-dev"
-        };
+        let other = crate::channel::OTHER_SERVICE_SLUG;
         let current = crate::SERVICE_SLUG;
-        require_no_unix_core_processes(
-            &format!("clash-verge-ser /var/lib/{other}/bin/clash-verge-service"),
-            true,
-        )?;
-        assert!(
-            require_no_unix_core_processes(
-                &format!("clash-verge-ser /var/lib/{current}/bin/clash-verge-service"),
-                true
-            )
-            .is_err()
-        );
-        assert!(require_no_unix_core_processes("clash-verge-ser /tmp/clash-verge-service", true).is_err());
+        let service = crate::SERVICE_BINARY;
+        let comm = service.chars().take(15).collect::<String>();
+        require_no_unix_core_processes(&format!("{comm} /var/lib/{other}/bin/{service}"), true)?;
+        assert!(require_no_unix_core_processes(&format!("{comm} /var/lib/{current}/bin/{service}"), true).is_err());
+        assert!(require_no_unix_core_processes(&format!("{comm} /tmp/{service}"), true).is_err());
         assert!(
             require_no_unix_core_processes(
                 &format!(
-                    "clash-verge-ser /var/lib/{other}/bin/clash-verge-service\nverge-mihomo-al /tmp/verge-mihomo-alpha"
+                    "{comm} /var/lib/{other}/bin/{service}\n{} /tmp/{}",
+                    crate::CORE_ALPHA_NAME.chars().take(15).collect::<String>(),
+                    crate::CORE_ALPHA_NAME
                 ),
                 true
             )
@@ -624,8 +621,33 @@ mod tests {
     #[test]
     fn linux_truncated_alpha_core_blocks_fallback() {
         for ipc_failed in [false, true] {
-            assert!(require_no_unix_core_processes("verge-mihomo-al", ipc_failed).is_err());
+            assert!(
+                require_no_unix_core_processes(
+                    &crate::CORE_ALPHA_NAME.chars().take(15).collect::<String>(),
+                    ipc_failed
+                )
+                .is_err()
+            );
         }
+    }
+
+    #[cfg(all(unix, feature = "client"))]
+    #[test]
+    fn other_brand_processes_do_not_block_configured_core() -> Result<()> {
+        let other = "unrelated-brand-core";
+        require_no_unix_core_processes(&format!("{other} /tmp/{other}"), true)?;
+        let name = crate::CORE_NAME;
+        assert!(require_no_unix_core_processes(&format!("{name} /tmp/{name}"), true).is_err());
+        if option_env!("CVR_CORE_NAME").is_some_and(|name| name != "verge-mihomo") {
+            require_no_unix_core_processes("verge-mihomo /tmp/verge-mihomo", true)?;
+        }
+        if crate::SERVICE_BINARY != "clash-verge-service" {
+            require_no_unix_core_processes(
+                "clash-verge-ser /var/lib/clash-verge-service/bin/clash-verge-service",
+                true,
+            )?;
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -663,19 +685,26 @@ mod tests {
     #[cfg(all(target_os = "macos", feature = "client"))]
     #[test]
     fn an_idle_helper_from_the_other_channel_does_not_block_fallback() -> Result<()> {
-        let production = "/Library/PrivilegedHelperTools/io.github.clash-verge-rev.clash-verge-rev.service.bundle/Contents/MacOS/clash-verge-service";
-        let development = "/Library/PrivilegedHelperTools/io.github.clash-verge-rev.clash-verge-rev.dev.service.bundle/Contents/MacOS/clash-verge-service";
-        let (current, other) = if cfg!(feature = "development-channel") {
-            (development, production)
-        } else {
-            (production, development)
-        };
-        require_no_unix_core_processes(other, true)?;
+        let current = format!(
+            "/Library/PrivilegedHelperTools/{}.bundle/Contents/MacOS/{}",
+            crate::MACOS_SERVICE_ID,
+            crate::SERVICE_BINARY
+        );
+        let other = format!(
+            "/Library/PrivilegedHelperTools/{}.bundle/Contents/MacOS/{}",
+            crate::channel::OTHER_MACOS_SERVICE_ID,
+            crate::SERVICE_BINARY
+        );
+        require_no_unix_core_processes(&other, true)?;
         for residual in [
             current.to_owned(),
-            "clash-verge-service".into(),
+            crate::SERVICE_BINARY.into(),
             format!("/tmp{other}"),
-            format!("{other}\n/Library/Application Support/clash-verge-service/cores/verge-mihomo"),
+            format!(
+                "{other}\n/Library/Application Support/{}/cores/{}",
+                crate::SERVICE_SLUG,
+                crate::CORE_NAME
+            ),
         ] {
             assert!(
                 require_no_unix_core_processes(&residual, true).is_err(),
@@ -684,8 +713,8 @@ mod tests {
         }
         for residual in [
             current.to_owned(),
-            format!("/tmp/verge-mihomo\n{current}"),
-            format!("{current}\n/tmp/verge-mihomo"),
+            format!("/tmp/{}\n{current}", crate::CORE_NAME),
+            format!("{current}\n/tmp/{}", crate::CORE_NAME),
         ] {
             let refusal = require_no_unix_core_processes(&residual, true).expect_err("residual helper must block");
             assert!(

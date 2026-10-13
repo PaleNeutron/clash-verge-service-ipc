@@ -182,7 +182,7 @@ fn installed_state_root(executable: &Path) -> io::Result<PathBuf> {
         && !executable
             .components()
             .any(|component| matches!(component, std::path::Component::ParentDir))
-        && matches_name(executable, "clash-verge-service.exe")
+        && matches_name(executable, &format!("{}.exe", crate::SERVICE_BINARY))
         && let Some(bin) = executable.parent()
         && matches_name(bin, "bin")
         && let Some(root) = bin.parent()

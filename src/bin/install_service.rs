@@ -24,11 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn bundled_service_binary() -> Result<PathBuf, Error> {
-    let source = std::env::current_exe()?.with_file_name(if cfg!(windows) {
-        "clash-verge-service.exe"
-    } else {
-        "clash-verge-service"
-    });
+    let source = std::env::current_exe()?.with_file_name(core_file_name(clash_verge_service_ipc::SERVICE_BINARY));
     let metadata = std::fs::symlink_metadata(&source)
         .with_context(|| format!("failed to inspect bundled service binary {source:?}"))?;
     if !metadata.file_type().is_file() {
@@ -120,7 +116,10 @@ fn stage_binary(source: &Path, target: &Path) -> Result<PathBuf, Error> {
 }
 
 /// Allowlist for auto-staging; excludes other executables shipped beside the installer.
-const BUNDLED_CORE_NAMES: [&str; 2] = ["verge-mihomo", "verge-mihomo-alpha"];
+const BUNDLED_CORE_NAMES: [&str; 2] = [
+    clash_verge_service_ipc::CORE_NAME,
+    clash_verge_service_ipc::CORE_ALPHA_NAME,
+];
 
 fn core_file_name(stem: &str) -> String {
     if cfg!(windows) {
@@ -763,7 +762,7 @@ fn main() -> Result<(), Error> {
 
     std::fs::create_dir_all(&macos_path).map_err(|e| anyhow::anyhow!("Failed to create bundle directories: {}", e))?;
 
-    let target_binary_path = macos_path.join("clash-verge-service");
+    let target_binary_path = macos_path.join(clash_verge_service_ipc::SERVICE_BINARY);
     let staged = stage_binary(&service_binary_path, &target_binary_path)?;
 
     let info_plist_path = contents_path.join("Info.plist");
@@ -784,8 +783,12 @@ fn main() -> Result<(), Error> {
     );
     let info_plist_content = format!(
         include_str!("../../resources/info.plist.tmpl"),
-        display_name = clash_verge_service_ipc::SERVICE_DISPLAY_NAME,
+        display_name = clash_verge_service_ipc::SERVICE_DISPLAY_NAME
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;"),
         service_id = clash_verge_service_ipc::MACOS_SERVICE_ID,
+        service_binary = clash_verge_service_ipc::SERVICE_BINARY,
     );
     let plist_path = plist_file.to_string_lossy().into_owned();
 
@@ -820,7 +823,9 @@ fn main() -> Result<(), Error> {
     )?;
     wait_for_service_ready()?;
     #[cfg(not(feature = "development-channel"))]
-    let _ = uninstall_old_service();
+    if !clash_verge_service_ipc::CUSTOM_BUILD {
+        let _ = uninstall_old_service();
+    }
 
     Ok(())
 }
@@ -843,7 +848,7 @@ fn main() -> Result<(), Error> {
     let debug = options.debug;
     let source = bundled_service_binary()?;
     let install_dir = clash_verge_service_ipc::prepare_service_install_directory()?;
-    let target = install_dir.join("clash-verge-service");
+    let target = install_dir.join(clash_verge_service_ipc::SERVICE_BINARY);
     let staged = stage_binary(&source, &target)?;
     let unit_name = format!("{}.service", clash_verge_service_ipc::SERVICE_SLUG);
     let unit_path = PathBuf::from("/etc/systemd/system").join(&unit_name);
@@ -859,6 +864,7 @@ fn main() -> Result<(), Error> {
         exec_start = target.to_string_lossy(),
         group = group,
         runtime_directory = clash_verge_service_ipc::SERVICE_SLUG,
+        display_name = clash_verge_service_ipc::SERVICE_DISPLAY_NAME,
     );
 
     let mut unit_file =
@@ -908,7 +914,7 @@ fn main() -> anyhow::Result<()> {
     }
     let source = bundled_service_binary()?;
     let install_dir = clash_verge_service_ipc::prepare_service_install_directory()?;
-    let target = install_dir.join("clash-verge-service.exe");
+    let target = install_dir.join(format!("{}.exe", clash_verge_service_ipc::SERVICE_BINARY));
     let staged = stage_binary(&source, &target)?;
 
     let manager_access = ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE;
@@ -1002,7 +1008,10 @@ fn main() -> anyhow::Result<()> {
     let start_access = ServiceAccess::CHANGE_CONFIG | ServiceAccess::START;
     let service = service_manager.create_service(&service_info, start_access)?;
 
-    service.set_description("Clash Verge Service helps to launch Clash Core")?;
+    service.set_description(format!(
+        "{} helps to launch Clash Core",
+        clash_verge_service_ipc::SERVICE_DISPLAY_NAME
+    ))?;
     configure_windows_service_recovery(&service)?;
     service.start(&Vec::<&OsStr>::new())?;
     wait_for_service_ready()?;
@@ -1070,7 +1079,7 @@ mod install_core_tests {
         let root = scratch("ensure payload")?;
         let source = root.join("bundled-service");
         let target = root.join("installed-service");
-        let core = root.join(super::core_file_name("verge-mihomo"));
+        let core = root.join(super::core_file_name(clash_verge_service_ipc::CORE_NAME));
         std::fs::write(&source, b"service")?;
         std::fs::write(&target, b"service")?;
         std::fs::write(&core, b"core")?;
@@ -1103,8 +1112,8 @@ mod install_core_tests {
     #[test]
     fn combined_install_publishes_both_attested_cores_from_a_writable_directory() -> anyhow::Result<()> {
         let root = scratch("scoop install")?;
-        let stable = root.join(super::core_file_name("verge-mihomo"));
-        let alpha = root.join(super::core_file_name("verge-mihomo-alpha"));
+        let stable = root.join(super::core_file_name(clash_verge_service_ipc::CORE_NAME));
+        let alpha = root.join(super::core_file_name(clash_verge_service_ipc::CORE_ALPHA_NAME));
         std::fs::write(&stable, b"stable core")?;
         std::fs::write(&alpha, b"alpha core")?;
         let mut options = combined_options(&[stable, alpha])?;
@@ -1121,8 +1130,8 @@ mod install_core_tests {
     #[test]
     fn combined_install_preflight_rejects_a_missing_or_mismatched_second_core() -> anyhow::Result<()> {
         let root = scratch("preflight")?;
-        let stable = root.join(super::core_file_name("verge-mihomo"));
-        let alpha = root.join(super::core_file_name("verge-mihomo-alpha"));
+        let stable = root.join(super::core_file_name(clash_verge_service_ipc::CORE_NAME));
+        let alpha = root.join(super::core_file_name(clash_verge_service_ipc::CORE_ALPHA_NAME));
         std::fs::write(&stable, b"stable core")?;
         std::fs::write(&alpha, b"alpha core")?;
         let mut options = combined_options(&[stable, alpha.clone()])?;
@@ -1140,7 +1149,7 @@ mod install_core_tests {
     #[test]
     fn explicit_core_failure_after_preflight_does_not_accept_the_previous_copy() -> anyhow::Result<()> {
         let root = scratch("changed-after-preflight")?;
-        let source = root.join(super::core_file_name("verge-mihomo"));
+        let source = root.join(super::core_file_name(clash_verge_service_ipc::CORE_NAME));
         let previous = root.join("cores").join(source.file_name().unwrap());
         std::fs::write(&source, b"new core")?;
         std::fs::write(&previous, b"old core")?;

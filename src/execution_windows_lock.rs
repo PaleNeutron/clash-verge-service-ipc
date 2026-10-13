@@ -14,10 +14,7 @@ use windows_sys::Win32::{
     System::Threading::{CreateMutexExW, ReleaseMutex, WaitForSingleObject},
 };
 
-#[cfg(not(feature = "test"))]
-pub(super) const NAME: &str = r"Global\clash-verge-service.core-execution";
-#[cfg(feature = "test")]
-pub(super) const NAME: &str = r"Global\clash-verge-service.core-execution-test";
+pub(super) const NAME: &str = crate::channel::CORE_MUTEX_NAME;
 
 #[derive(Debug)]
 pub(super) struct Reservation {

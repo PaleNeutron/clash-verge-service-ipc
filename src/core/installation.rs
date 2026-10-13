@@ -49,8 +49,8 @@ pub(super) async fn inspect(
 
 fn inspect_core(directory: &Path, required: &CoreRequirement) -> CoreAvailability {
     let allowed = [
-        format!("verge-mihomo{}", std::env::consts::EXE_SUFFIX),
-        format!("verge-mihomo-alpha{}", std::env::consts::EXE_SUFFIX),
+        format!("{}{}", crate::CORE_NAME, std::env::consts::EXE_SUFFIX),
+        format!("{}{}", crate::CORE_ALPHA_NAME, std::env::consts::EXE_SUFFIX),
     ];
     if !allowed.contains(&required.name) {
         return CoreAvailability::Rejected {
@@ -78,4 +78,33 @@ fn inspect_core(directory: &Path, required: &CoreRequirement) -> CoreAvailabilit
     result.unwrap_or_else(|error| CoreAvailability::Rejected {
         reason: error.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn configured_core_names_are_accepted_without_accepting_another_brand() {
+        let directory = std::env::temp_dir().join(format!("identity-missing-core-{}", std::process::id()));
+        for name in [
+            option_env!("CVR_CORE_NAME").unwrap_or("verge-mihomo"),
+            option_env!("CVR_CORE_ALPHA_NAME").unwrap_or("verge-mihomo-alpha"),
+        ] {
+            let required = crate::CoreRequirement {
+                name: format!("{name}{}", std::env::consts::EXE_SUFFIX),
+                sha256: None,
+            };
+            assert_eq!(
+                super::inspect_core(&directory, &required),
+                crate::CoreAvailability::Missing
+            );
+        }
+        let other = crate::CoreRequirement {
+            name: format!("other-brand-core{}", std::env::consts::EXE_SUFFIX),
+            sha256: None,
+        };
+        assert!(matches!(
+            super::inspect_core(&directory, &other),
+            crate::CoreAvailability::Rejected { .. }
+        ));
+    }
 }

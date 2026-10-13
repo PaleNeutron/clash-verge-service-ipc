@@ -183,13 +183,13 @@ fn runtime_dir() -> PathBuf {
     Path::new(crate::IPC_PATH)
         .parent()
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("/run/clash-verge-service"))
+        .unwrap_or_else(|| PathBuf::from("/run").join(crate::SERVICE_SLUG))
 }
 
 fn persistent_state_dir() -> std::io::Result<PathBuf> {
     #[cfg(feature = "test")]
     {
-        Ok(std::env::temp_dir().join("clash-verge-service-ipc-test-state"))
+        Ok(std::env::temp_dir().join(crate::channel::TEST_STATE_NAMESPACE))
     }
 
     // A root launchd daemon needs stable system state independent of unreliable HOME/XDG values
@@ -215,7 +215,7 @@ pub(crate) fn unix_mihomo_ipc_path(runtime_root: &Path, uid: u32) -> PathBuf {
     runtime_root
         .join("users")
         .join(uid.to_string())
-        .join("verge-mihomo.sock")
+        .join(format!("{}.sock", crate::CORE_IPC_NAME))
 }
 
 pub fn mihomo_ipc_path(identity: &OwnerIdentity) -> String {
@@ -228,14 +228,16 @@ pub fn mihomo_ipc_path(identity: &OwnerIdentity) -> String {
                 } else {
                     crate::CHANNEL_IDENTITY.id
                 };
-                format!(r"\\.\pipe\verge-mihomo-{}-{}", channel_id, owner_key(identity))
+                format!(
+                    r"\\.\pipe\{}-{}-{}",
+                    crate::CORE_IPC_NAME,
+                    channel_id,
+                    owner_key(identity)
+                )
             }
 
             #[cfg(unix)]
             {
-                #[cfg(feature = "test")]
-                let runtime_root = PathBuf::from("/tmp/clash-verge-service-ipc-test");
-                #[cfg(not(feature = "test"))]
                 let runtime_root = runtime_dir();
 
                 unix_mihomo_ipc_path(&runtime_root, *_uid)
@@ -249,7 +251,12 @@ pub fn mihomo_ipc_path(identity: &OwnerIdentity) -> String {
             } else {
                 crate::CHANNEL_IDENTITY.id
             };
-            format!(r"\\.\pipe\verge-mihomo-{}-{}", channel_id, owner_key(identity))
+            format!(
+                r"\\.\pipe\{}-{}-{}",
+                crate::CORE_IPC_NAME,
+                channel_id,
+                owner_key(identity)
+            )
         }
     }
 }
@@ -270,9 +277,20 @@ mod tests {
 
         assert_eq!(
             path,
-            Path::new("/var/run/clash-verge-service/users/501/verge-mihomo.sock")
+            Path::new("/var/run/clash-verge-service/users/501").join(format!("{}.sock", crate::CORE_IPC_NAME))
         );
         assert!(path.as_os_str().as_encoded_bytes().len() < 104);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_identity_reaches_service_and_core_sockets() {
+        if let Some(slug) = option_env!("CVR_SERVICE_SLUG") {
+            assert!(crate::IPC_PATH.contains(slug));
+        }
+        let core = option_env!("CVR_CORE_IPC_NAME").unwrap_or("verge-mihomo");
+        let socket = super::mihomo_ipc_path(&OwnerIdentity::Unix { uid: 501, gid: 20 });
+        assert!(socket.ends_with(&format!("/{core}.sock")));
     }
 
     #[test]
@@ -298,7 +316,7 @@ mod tests {
             sid: "S-1-5-21-1-2-3-1001".to_owned(),
         });
 
-        assert!(path.starts_with(r"\\.\pipe\verge-mihomo-test-"));
+        assert!(path.starts_with(&format!(r"\\.\pipe\{}-test-", crate::CORE_IPC_NAME)));
         assert!(!path.contains("verge-mihomo-production"));
     }
 }

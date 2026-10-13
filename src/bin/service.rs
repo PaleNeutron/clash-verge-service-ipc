@@ -160,7 +160,7 @@ fn run_service() -> platform_lib::Result<()> {
 
 async fn run_standalone() -> Result<()> {
     let pid = std::process::id();
-    info!("Clash Verge Service - Standalone Mode");
+    info!("{} - Standalone Mode", clash_verge_service_ipc::SERVICE_DISPLAY_NAME);
     info!("Current process PID: {}", pid);
 
     let Some(_owner_guard) = acquire_service_owner().await? else {

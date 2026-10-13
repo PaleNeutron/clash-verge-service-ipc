@@ -94,12 +94,8 @@ async fn wait_protocol_ready() -> anyhow::Result<()> {
 
 async fn start_flow() -> anyhow::Result<()> {
     wait_ipc_ready().await?;
-    let config = RuntimeBundle {
-        yaml: "mode: rule\n".to_string(),
-        assets: vec![],
-        remote_providers: Vec::new(),
-        core_path: mock_binary_path()?,
-    };
+    let config_path = std::env::var_os("CLASH_VERGE_TEST_CONFIG_PATH").map(std::path::PathBuf::from);
+    let config = runtime_bundle(mock_binary_path()?, config_path.as_deref())?;
     let response = start_clash(
         &owner_credentials()?,
         &StartClashRequest {
@@ -119,6 +115,34 @@ async fn start_flow() -> anyhow::Result<()> {
         .generation;
     println!("{generation}");
     Ok(())
+}
+
+fn runtime_bundle(core_path: String, config_path: Option<&std::path::Path>) -> anyhow::Result<RuntimeBundle> {
+    Ok(RuntimeBundle {
+        yaml: match config_path {
+            Some(path) => std::fs::read_to_string(path)
+                .with_context(|| format!("could not read runtime configuration {path:?}"))?,
+            None => "mode: rule\n".to_owned(),
+        },
+        assets: vec![],
+        remote_providers: Vec::new(),
+        core_path,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn real_core_smoke_uses_the_requested_runtime_configuration() -> anyhow::Result<()> {
+        let path = std::env::temp_dir().join(format!("service-driver-config-{}.yaml", std::process::id()));
+        let yaml = "mode: rule\ntun:\n  enable: true\n  device: aurora\n";
+        std::fs::write(&path, yaml)?;
+        let bundle = super::runtime_bundle("/opt/aurora/aurora-core".to_owned(), Some(&path))?;
+        std::fs::remove_file(path)?;
+        assert_eq!(bundle.yaml, yaml);
+        assert_eq!(bundle.core_path, "/opt/aurora/aurora-core");
+        Ok(())
+    }
 }
 
 async fn stop_flow() -> anyhow::Result<()> {
@@ -197,6 +221,9 @@ fn owner_credentials() -> anyhow::Result<OwnerCredentials> {
 }
 
 fn mock_binary_path() -> anyhow::Result<String> {
+    if let Some(path) = std::env::var_os("CLASH_VERGE_TEST_CORE_PATH") {
+        return Ok(std::path::PathBuf::from(path).to_string_lossy().into_owned());
+    }
     let current_exe = std::env::current_exe()?;
     let mut path = current_exe;
     path.pop();

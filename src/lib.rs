@@ -9,8 +9,8 @@ pub mod management;
 mod client;
 
 pub use channel::{
-    CHANNEL_IDENTITY, ChannelIdentity, MACOS_APP_BUNDLE_ID, MACOS_SERVICE_ID, SERVICE_DISPLAY_NAME, SERVICE_SLUG,
-    WINDOWS_SERVICE_NAME,
+    CHANNEL_IDENTITY, CORE_ALPHA_NAME, CORE_IPC_NAME, CORE_NAME, CUSTOM_BUILD, ChannelIdentity, IPC_PATH,
+    MACOS_APP_BUNDLE_ID, MACOS_SERVICE_ID, SERVICE_BINARY, SERVICE_DISPLAY_NAME, SERVICE_SLUG, WINDOWS_SERVICE_NAME,
 };
 pub use core::{
     AuthenticatedRequest, AuthenticatedSessionRequest, ClashConfig, CoreAvailability, CoreConfig, CoreInspection,
@@ -41,34 +41,6 @@ pub use core::{CoreWatchdogTestConfig, set_core_watchdog_config_for_tests};
 
 #[cfg(feature = "client")]
 pub use client::*;
-
-#[cfg(all(target_os = "macos", not(feature = "test"), not(feature = "development-channel")))]
-pub static IPC_PATH: &str = "/var/run/clash-verge-service/service.sock";
-#[cfg(all(target_os = "macos", not(feature = "test"), feature = "development-channel"))]
-pub static IPC_PATH: &str = "/var/run/clash-verge-service-dev/service.sock";
-#[cfg(all(
-    unix,
-    not(target_os = "macos"),
-    not(feature = "test"),
-    not(feature = "development-channel")
-))]
-pub static IPC_PATH: &str = "/run/clash-verge-service/service.sock";
-#[cfg(all(
-    unix,
-    not(target_os = "macos"),
-    not(feature = "test"),
-    feature = "development-channel"
-))]
-pub static IPC_PATH: &str = "/run/clash-verge-service-dev/service.sock";
-#[cfg(all(windows, not(feature = "test"), not(feature = "development-channel")))]
-pub static IPC_PATH: &str = r"\\.\pipe\clash-verge-service";
-#[cfg(all(windows, not(feature = "test"), feature = "development-channel"))]
-pub static IPC_PATH: &str = r"\\.\pipe\clash-verge-service-dev";
-
-#[cfg(all(feature = "test", unix))]
-pub static IPC_PATH: &str = "/tmp/clash-verge-service-ipc-test/service.sock";
-#[cfg(all(feature = "test", windows))]
-pub static IPC_PATH: &str = r"\\.\pipe\clash-verge-service-test";
 
 #[cfg(any(feature = "standalone", feature = "client"))]
 pub static IPC_AUTH_EXPECT: &str =

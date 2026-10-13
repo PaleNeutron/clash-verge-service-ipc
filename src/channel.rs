@@ -8,25 +8,7 @@ pub struct ChannelIdentity {
     pub macos_service_id: &'static str,
 }
 
-#[cfg(not(feature = "development-channel"))]
-pub const CHANNEL_IDENTITY: ChannelIdentity = ChannelIdentity {
-    id: "production",
-    service_slug: "clash-verge-service",
-    windows_service_name: "clash_verge_service",
-    service_display_name: "Clash Verge Service",
-    macos_app_bundle_id: "io.github.clash-verge-rev.clash-verge-rev",
-    macos_service_id: "io.github.clash-verge-rev.clash-verge-rev.service",
-};
-
-#[cfg(feature = "development-channel")]
-pub const CHANNEL_IDENTITY: ChannelIdentity = ChannelIdentity {
-    id: "development",
-    service_slug: "clash-verge-service-dev",
-    windows_service_name: "clash_verge_service_dev",
-    service_display_name: "Clash Verge Development Service",
-    macos_app_bundle_id: "io.github.clash-verge-rev.clash-verge-rev.dev",
-    macos_service_id: "io.github.clash-verge-rev.clash-verge-rev.dev.service",
-};
+include!(concat!(env!("OUT_DIR"), "/identity.rs"));
 
 pub const SERVICE_SLUG: &str = CHANNEL_IDENTITY.service_slug;
 pub const WINDOWS_SERVICE_NAME: &str = CHANNEL_IDENTITY.windows_service_name;
@@ -39,14 +21,33 @@ mod tests {
     use super::CHANNEL_IDENTITY;
 
     #[test]
+    fn configured_service_identity_is_registered() {
+        if let Some(expected) = option_env!("CVR_SERVICE_SLUG") {
+            let expected = if cfg!(feature = "development-channel") {
+                format!("{expected}-dev")
+            } else {
+                expected.to_owned()
+            };
+            assert_eq!(CHANNEL_IDENTITY.service_slug, expected);
+        }
+        if let Some(expected) = option_env!("CVR_WINDOWS_SERVICE_NAME") {
+            let expected = if cfg!(feature = "development-channel") {
+                format!("{expected}_dev")
+            } else {
+                expected.to_owned()
+            };
+            assert_eq!(CHANNEL_IDENTITY.windows_service_name, expected);
+        }
+        if let Some(expected) = option_env!("CVR_OWNER_TOKEN_FILE") {
+            assert_eq!(crate::OWNER_TOKEN_FILE_NAME, expected);
+        }
+    }
+
+    #[test]
     fn compiled_channel_has_a_self_consistent_identity() {
         assert!(!CHANNEL_IDENTITY.id.is_empty());
-        assert!(CHANNEL_IDENTITY.service_slug.starts_with("clash-verge-service"));
-        assert!(CHANNEL_IDENTITY.windows_service_name.starts_with("clash_verge_service"));
-        assert!(
-            CHANNEL_IDENTITY
-                .macos_service_id
-                .starts_with(CHANNEL_IDENTITY.macos_app_bundle_id)
-        );
+        assert!(!CHANNEL_IDENTITY.service_slug.is_empty());
+        assert!(!CHANNEL_IDENTITY.windows_service_name.is_empty());
+        assert!(!CHANNEL_IDENTITY.macos_service_id.is_empty());
     }
 }

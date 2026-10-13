@@ -13,7 +13,7 @@ use windows_sys::Win32::{
 };
 
 pub(super) fn require_no_registered_services() -> Result<()> {
-    require_services_absent(&["clash_verge_service", "clash_verge_service_dev"])
+    require_services_absent(&[crate::WINDOWS_SERVICE_NAME, crate::channel::OTHER_WINDOWS_SERVICE_NAME])
 }
 
 fn require_services_absent(names: &[&str]) -> Result<()> {
@@ -59,9 +59,12 @@ pub(super) fn require_stopped_service() -> Result<()> {
 
 pub(super) fn require_no_core_process(include_service: bool) -> Result<()> {
     #[cfg(not(feature = "test"))]
-    const CORE_NAMES: &[&str] = &["verge-mihomo.exe", "verge-mihomo-alpha.exe"];
+    let core_names = [
+        format!("{}.exe", crate::CORE_NAME),
+        format!("{}.exe", crate::CORE_ALPHA_NAME),
+    ];
     #[cfg(feature = "test")]
-    const CORE_NAMES: &[&str] = &["mock_binary.exe", "crash_binary.exe"];
+    let core_names = ["mock_binary.exe".to_owned(), "crash_binary.exe".to_owned()];
     let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if raw == INVALID_HANDLE_VALUE {
         return Err(std::io::Error::last_os_error()).context("cannot inspect existing core processes");
@@ -80,8 +83,8 @@ pub(super) fn require_no_core_process(include_service: bool) -> Result<()> {
             .unwrap_or(entry.szExeFile.len());
         let name = String::from_utf16_lossy(&entry.szExeFile[..length]);
         // SCM can be stopped while a core from an earlier service process remains alive.
-        if CORE_NAMES.iter().any(|core| name.eq_ignore_ascii_case(core))
-            || (include_service && name.eq_ignore_ascii_case("clash-verge-service.exe"))
+        if core_names.iter().any(|core| name.eq_ignore_ascii_case(core))
+            || (include_service && name.eq_ignore_ascii_case(&format!("{}.exe", crate::SERVICE_BINARY)))
         {
             bail!(
                 "process {name} (PID {}) is still running; refusing a second core",
