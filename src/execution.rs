@@ -310,6 +310,30 @@ fn require_no_unix_core_processes(processes: &str, include_service: bool) -> Res
 }
 
 #[cfg(all(target_os = "linux", feature = "client"))]
+fn resolve_linux_process_executable(executable: std::io::Result<PathBuf>, cmdline: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+    match executable {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            // Root helpers may deny ptrace access to exe while their cmdline remains readable.
+            let arguments = std::fs::read(cmdline)
+                .map_err(|error| std::io::Error::other(format!("could not read process command line: {error}")))?;
+            let end = arguments
+                .iter()
+                .position(|byte| *byte == 0)
+                .filter(|end| *end != 0)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "process command line has no complete argv[0]",
+                    )
+                })?;
+            Ok(PathBuf::from(std::ffi::OsString::from_vec(arguments[..end].to_vec())))
+        }
+        result => result,
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "client"))]
 fn linux_process_executables(processes: &str, include_service: bool) -> Result<Vec<PathBuf>> {
     use std::os::unix::ffi::OsStringExt as _;
     let mut executables = Vec::new();
@@ -327,7 +351,10 @@ fn linux_process_executables(processes: &str, include_service: bool) -> Result<V
             continue;
         }
         let pid = pid.parse::<u32>().context("process listing contains an invalid pid")?;
-        match std::fs::read_link(format!("/proc/{pid}/exe")) {
+        match resolve_linux_process_executable(
+            std::fs::read_link(format!("/proc/{pid}/exe")),
+            &PathBuf::from(format!("/proc/{pid}/cmdline")),
+        ) {
             Ok(executable) => {
                 // Linux appends this marker when an upgrade unlinks a running executable.
                 let executable =
@@ -656,6 +683,38 @@ mod tests {
         if ![crate::CORE_NAME, crate::CORE_ALPHA_NAME, crate::SERVICE_BINARY].contains(&"clash-verge-service") {
             require_no_core_executables(&["/var/lib/clash-verge-service/bin/clash-verge-service".into()], true)?;
         }
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "linux", feature = "client"))]
+    #[test]
+    fn linux_process_identity_falls_back_to_nul_delimited_argv0_when_exe_is_denied() -> Result<()> {
+        let cmdline = std::env::temp_dir().join(format!("cvr-proc-cmdline-{}", std::process::id()));
+        let executable = format!("/tmp/cvr review/{}", crate::CORE_ALPHA_NAME);
+        std::fs::write(&cmdline, format!("{executable}\0argument with spaces\0"))?;
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let resolved = super::resolve_linux_process_executable(Err(denied), &cmdline);
+        let absent = super::resolve_linux_process_executable(Err(std::io::ErrorKind::NotFound.into()), &cmdline);
+        let other = format!(
+            "/var/lib/{}/bin/{}",
+            crate::channel::OTHER_SERVICE_SLUG,
+            crate::SERVICE_BINARY
+        );
+        std::fs::write(&cmdline, format!("{other}\0--debug\0"))?;
+        let other = super::resolve_linux_process_executable(Err(std::io::ErrorKind::PermissionDenied.into()), &cmdline);
+        std::fs::write(&cmdline, b"\0")?;
+        let incomplete =
+            super::resolve_linux_process_executable(Err(std::io::ErrorKind::PermissionDenied.into()), &cmdline);
+        std::fs::remove_file(&cmdline)?;
+        let unreadable =
+            super::resolve_linux_process_executable(Err(std::io::ErrorKind::PermissionDenied.into()), &cmdline);
+        let authoritative = super::resolve_linux_process_executable(Ok(PathBuf::from(&executable)), &cmdline);
+        assert_eq!(resolved?, PathBuf::from(&executable));
+        assert_eq!(authoritative?, PathBuf::from(executable));
+        require_no_core_executables(&[other?], true)?;
+        assert_eq!(absent.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(incomplete.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        assert_ne!(unreadable.unwrap_err().kind(), std::io::ErrorKind::NotFound);
         Ok(())
     }
 
